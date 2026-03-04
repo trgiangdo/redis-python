@@ -1,12 +1,14 @@
 import socket
 import threading
 
-from app.resp_parser import decode_resp
+from app.resp_parser import bulk_string, decode_resp
 
 HOST = "localhost"
 PORT = 6379
 
 BUFFER_SIZE_BYTES = 1024
+
+store: dict[str, str] = {}
 
 
 def handle_connection(conn: socket.socket) -> None:
@@ -22,8 +24,13 @@ def handle_connection(conn: socket.socket) -> None:
             case "PING":
                 conn.sendall(b"+PONG\r\n")
             case "ECHO":
-                msg = args[1].encode()
-                conn.sendall(b"$" + str(len(msg)).encode() + b"\r\n" + msg + b"\r\n")
+                conn.sendall(bulk_string(args[1]))
+            case "SET":
+                store[args[1]] = args[2]
+                conn.sendall(b"+OK\r\n")
+            case "GET":
+                value = store.get(args[1])
+                conn.sendall(bulk_string(value) if value is not None else b"$-1\r\n")
             case _:
                 conn.sendall(b"-ERR unknown command\r\n")
 

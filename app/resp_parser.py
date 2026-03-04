@@ -23,3 +23,8 @@ def decode_resp(data: str) -> List[str]:
         i += 1
 
     return result
+
+
+def bulk_string(value: str) -> bytes:
+    encoded = value.encode()
+    return b"$" + str(len(encoded)).encode() + b"\r\n" + encoded + b"\r\n"
