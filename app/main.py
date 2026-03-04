@@ -1,5 +1,6 @@
 import socket
 import threading
+import time
 
 from app.resp_parser import bulk_string, decode_resp
 
@@ -8,7 +9,8 @@ PORT = 6379
 
 BUFFER_SIZE_BYTES = 1024
 
-store: dict[str, str] = {}
+# Maps key -> (value, expiry_ms) where expiry_ms is None if no expiry
+store: dict[str, tuple[str, float | None]] = {}
 
 
 def handle_connection(conn: socket.socket) -> None:
@@ -26,11 +28,26 @@ def handle_connection(conn: socket.socket) -> None:
             case "ECHO":
                 conn.sendall(bulk_string(args[1]))
             case "SET":
-                store[args[1]] = args[2]
+                expiry_ms = None
+                if len(args) >= 4:
+                    match args[3].upper():
+                        case "EX":
+                            expiry_ms = time.time() * 1000 + int(args[4]) * 1000
+                        case "PX":
+                            expiry_ms = time.time() * 1000 + int(args[4])
+                store[args[1]] = (args[2], expiry_ms)
                 conn.sendall(b"+OK\r\n")
             case "GET":
-                value = store.get(args[1])
-                conn.sendall(bulk_string(value) if value is not None else b"$-1\r\n")
+                entry = store.get(args[1])
+                if entry is None:
+                    conn.sendall(b"$-1\r\n")
+                else:
+                    value, expiry_ms = entry
+                    if expiry_ms is not None and time.time() * 1000 > expiry_ms:
+                        del store[args[1]]
+                        conn.sendall(b"$-1\r\n")
+                    else:
+                        conn.sendall(bulk_string(value))
             case _:
                 conn.sendall(b"-ERR unknown command\r\n")
 
