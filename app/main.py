@@ -2,7 +2,7 @@ import socket
 import threading
 import time
 
-from app.resp_parser import bulk_string, decode_resp
+from app.resp_parser import bulk_int, bulk_string, decode_resp
 
 HOST = "localhost"
 PORT = 6379
@@ -11,6 +11,7 @@ BUFFER_SIZE_BYTES = 1024
 
 # Maps key -> (value, expiry_ms) where expiry_ms is None if no expiry
 store: dict[str, tuple[str, float | None]] = {}
+list_store: dict[str, list[str]] = {}
 
 
 def handle_connection(conn: socket.socket) -> None:
@@ -48,6 +49,10 @@ def handle_connection(conn: socket.socket) -> None:
                         conn.sendall(b"$-1\r\n")
                     else:
                         conn.sendall(bulk_string(value))
+            case "RPUSH":
+                lst = list_store.setdefault(args[1], [])
+                lst.extend(args[2:])
+                conn.sendall(bulk_int(len(lst)))
             case _:
                 conn.sendall(b"-ERR unknown command\r\n")
 

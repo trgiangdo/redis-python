@@ -25,6 +25,10 @@ def decode_resp(data: str) -> List[str]:
     return result
 
 
+def bulk_int(value: int) -> bytes:
+    return b":" + str(value).encode() + b"\r\n"
+
+
 def bulk_string(value: str) -> bytes:
     encoded = value.encode()
     return b"$" + str(len(encoded)).encode() + b"\r\n" + encoded + b"\r\n"
