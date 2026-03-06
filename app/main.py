@@ -53,6 +53,10 @@ def handle_connection(conn: socket.socket) -> None:
                 lst = list_store.setdefault(args[1], [])
                 lst.extend(args[2:])
                 conn.sendall(bulk_int(len(lst)))
+            case "LPUSH":
+                lst = list_store.setdefault(args[1], [])
+                lst[:0] = reversed(args[2:])
+                conn.sendall(bulk_int(len(lst)))
             case "LRANGE":
                 lst = list_store.get(args[1], [])
                 start, stop = int(args[2]), int(args[3])
