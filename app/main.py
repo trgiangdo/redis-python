@@ -63,6 +63,9 @@ def handle_connection(conn: socket.socket) -> None:
                 if stop == -1:
                     stop = len(lst)
                 conn.sendall(bulk_array(lst[start:stop + 1]))
+            case "LLEN":
+                lst = list_store.get(args[1], [])
+                conn.sendall(bulk_int(len(lst)))
             case _:
                 conn.sendall(b"-ERR unknown command\r\n")
 
