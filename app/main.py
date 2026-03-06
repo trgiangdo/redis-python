@@ -2,7 +2,7 @@ import socket
 import threading
 import time
 
-from app.resp_parser import bulk_int, bulk_string, decode_resp
+from app.resp_parser import bulk_array, bulk_int, bulk_string, decode_resp
 
 HOST = "localhost"
 PORT = 6379
@@ -53,6 +53,10 @@ def handle_connection(conn: socket.socket) -> None:
                 lst = list_store.setdefault(args[1], [])
                 lst.extend(args[2:])
                 conn.sendall(bulk_int(len(lst)))
+            case "LRANGE":
+                lst = list_store.get(args[1], [])
+                start, stop = int(args[2]), int(args[3])
+                conn.sendall(bulk_array(lst[start:stop + 1]))
             case _:
                 conn.sendall(b"-ERR unknown command\r\n")
 
