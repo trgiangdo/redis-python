@@ -63,6 +63,16 @@ def handle_connection(conn: socket.socket) -> None:
                 if stop == -1:
                     stop = len(lst)
                 conn.sendall(bulk_array(lst[start:stop + 1]))
+            case "LPOP":
+                lst = list_store.get(args[1])
+                if not lst:
+                    conn.sendall(b"$-1\r\n")
+                elif len(args) == 2:
+                    conn.sendall(bulk_string(lst.pop(0)))
+                else:
+                    count = int(args[2])
+                    popped, lst[:count] = lst[:count], []
+                    conn.sendall(bulk_array(popped))
             case "LLEN":
                 lst = list_store.get(args[1], [])
                 conn.sendall(bulk_int(len(lst)))
