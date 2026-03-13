@@ -98,7 +98,7 @@ def handle_connection(conn: socket.socket) -> None:
                         if remaining == 0.0:
                             break
                         list_condition.wait(timeout=remaining)
-                conn.sendall(response if response else b"$-1\r\n")
+                conn.sendall(response if response else b"*-1\r\n")
             case "LLEN":
                 lst = list_store.get(args[1], [])
                 conn.sendall(bulk_int(len(lst)))
