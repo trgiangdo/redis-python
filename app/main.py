@@ -12,6 +12,7 @@ BUFFER_SIZE_BYTES = 1024
 # Maps key -> (value, expiry_ms) where expiry_ms is None if no expiry
 store: dict[str, tuple[str, float | None]] = {}
 list_store: dict[str, list[str]] = {}
+list_condition = threading.Condition()
 
 
 def handle_connection(conn: socket.socket) -> None:
@@ -50,12 +51,16 @@ def handle_connection(conn: socket.socket) -> None:
                     else:
                         conn.sendall(bulk_string(value))
             case "RPUSH":
-                lst = list_store.setdefault(args[1], [])
-                lst.extend(args[2:])
+                with list_condition:
+                    lst = list_store.setdefault(args[1], [])
+                    lst.extend(args[2:])
+                    list_condition.notify_all()
                 conn.sendall(bulk_int(len(lst)))
             case "LPUSH":
-                lst = list_store.setdefault(args[1], [])
-                lst[:0] = reversed(args[2:])
+                with list_condition:
+                    lst = list_store.setdefault(args[1], [])
+                    lst[:0] = reversed(args[2:])
+                    list_condition.notify_all()
                 conn.sendall(bulk_int(len(lst)))
             case "LRANGE":
                 lst = list_store.get(args[1], [])
@@ -73,6 +78,27 @@ def handle_connection(conn: socket.socket) -> None:
                     count = int(args[2])
                     popped, lst[:count] = lst[:count], []
                     conn.sendall(bulk_array(popped))
+            case "BLPOP":
+                try:
+                    keys, timeout = args[1:-1], float(args[-1])
+                except ValueError:
+                    keys, timeout = args[1:], 0.0
+                deadline = time.time() + timeout if timeout > 0 else None
+                response = None
+                with list_condition:
+                    while response is None:
+                        for key in keys:
+                            lst = list_store.get(key)
+                            if lst:
+                                response = bulk_array([key, lst.pop(0)])
+                                break
+                        if response:
+                            break
+                        remaining = max(0.0, deadline - time.time()) if deadline else None
+                        if remaining == 0.0:
+                            break
+                        list_condition.wait(timeout=remaining)
+                conn.sendall(response if response else b"$-1\r\n")
             case "LLEN":
                 lst = list_store.get(args[1], [])
                 conn.sendall(bulk_int(len(lst)))
@@ -87,7 +113,6 @@ def main():
         while True:
             connection, _ = server_socket.accept()
             threading.Thread(target=handle_connection, args=(connection,)).start()
-
 
 
 if __name__ == "__main__":
