@@ -99,6 +99,15 @@ def handle_connection(conn: socket.socket) -> None:
                             break
                         list_condition.wait(timeout=remaining)
                 conn.sendall(response if response else b"*-1\r\n")
+            case "TYPE":
+                key = args[1]
+                if key in store:
+                    type_ = "string"
+                elif key in list_store:
+                    type_ = "list"
+                else:
+                    type_ = "none"
+                conn.sendall(b"+" + type_.encode() + b"\r\n")
             case "LLEN":
                 lst = list_store.get(args[1], [])
                 conn.sendall(bulk_int(len(lst)))
