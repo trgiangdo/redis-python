@@ -18,22 +18,36 @@ list_condition = threading.Condition()
 stream_store: dict[str, list[tuple[str, dict[str, str]]]] = {}
 
 
-def _generate_stream_id(key: str, requested_id: str) -> str:
+_XADD_ID_ERROR = b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
+_XADD_ID_ZERO_ERROR = b"-ERR The ID specified in XADD must be greater than 0-0\r\n"
+
+
+def _generate_stream_id(key: str, requested_id: str) -> tuple[str, bytes | None]:
+    """Returns (generated_id, error_bytes). If error_bytes is not None, the ID is invalid."""
     entries = stream_store.get(key, [])
-    last_ms, last_seq = (int(entries[-1][0].split("-")[0]), int(entries[-1][0].split("-")[1])) if entries else (0, -1)
+    # Base case: treat empty stream as if last entry was 0-0 (so minimum valid ID is 0-1)
+    last_ms, last_seq = (int(entries[-1][0].split("-")[0]), int(entries[-1][0].split("-")[1])) if entries else (0, 0)
 
     if requested_id == "*":
-        ms = int(time.time() * 1000)
+        ms = max(int(time.time() * 1000), last_ms)
         seq = (last_seq + 1) if ms == last_ms else 0
-        return f"{ms}-{seq}"
+        return f"{ms}-{seq}", None
 
     ms_str, seq_str = requested_id.split("-")
     ms = int(ms_str)
-    if seq_str == "*":
-        seq = (last_seq + 1) if ms == last_ms else 0
-        return f"{ms}-{seq}"
 
-    return requested_id
+    if seq_str == "*":
+        if ms < last_ms:
+            return "", _XADD_ID_ERROR
+        seq = (last_seq + 1) if ms == last_ms else 0
+        return f"{ms}-{seq}", None
+
+    seq = int(seq_str)
+    if ms == 0 and seq == 0:
+        return "", _XADD_ID_ZERO_ERROR
+    if (ms, seq) <= (last_ms, last_seq):
+        return "", _XADD_ID_ERROR
+    return f"{ms}-{seq}", None
 
 
 def handle_connection(conn: socket.socket) -> None:
@@ -122,10 +136,13 @@ def handle_connection(conn: socket.socket) -> None:
                 conn.sendall(response if response else b"*-1\r\n")
             case "XADD":
                 key = args[1]
-                entry_id = _generate_stream_id(key, args[2])
-                fields = dict(zip(args[3::2], args[4::2]))
-                stream_store.setdefault(key, []).append((entry_id, fields))
-                conn.sendall(bulk_string(entry_id))
+                entry_id, err = _generate_stream_id(key, args[2])
+                if err:
+                    conn.sendall(err)
+                else:
+                    fields = dict(zip(args[3::2], args[4::2]))
+                    stream_store.setdefault(key, []).append((entry_id, fields))
+                    conn.sendall(bulk_string(entry_id))
             case "TYPE":
                 key = args[1]
                 if key in store:
