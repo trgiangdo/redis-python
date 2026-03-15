@@ -14,6 +14,27 @@ store: dict[str, tuple[str, float | None]] = {}
 list_store: dict[str, list[str]] = {}
 list_condition = threading.Condition()
 
+# Each stream entry: (id, {field: value, ...})
+stream_store: dict[str, list[tuple[str, dict[str, str]]]] = {}
+
+
+def _generate_stream_id(key: str, requested_id: str) -> str:
+    entries = stream_store.get(key, [])
+    last_ms, last_seq = (int(entries[-1][0].split("-")[0]), int(entries[-1][0].split("-")[1])) if entries else (0, -1)
+
+    if requested_id == "*":
+        ms = int(time.time() * 1000)
+        seq = (last_seq + 1) if ms == last_ms else 0
+        return f"{ms}-{seq}"
+
+    ms_str, seq_str = requested_id.split("-")
+    ms = int(ms_str)
+    if seq_str == "*":
+        seq = (last_seq + 1) if ms == last_ms else 0
+        return f"{ms}-{seq}"
+
+    return requested_id
+
 
 def handle_connection(conn: socket.socket) -> None:
     while True:
@@ -99,12 +120,20 @@ def handle_connection(conn: socket.socket) -> None:
                             break
                         list_condition.wait(timeout=remaining)
                 conn.sendall(response if response else b"*-1\r\n")
+            case "XADD":
+                key = args[1]
+                entry_id = _generate_stream_id(key, args[2])
+                fields = dict(zip(args[3::2], args[4::2]))
+                stream_store.setdefault(key, []).append((entry_id, fields))
+                conn.sendall(bulk_string(entry_id))
             case "TYPE":
                 key = args[1]
                 if key in store:
                     type_ = "string"
                 elif key in list_store:
                     type_ = "list"
+                elif key in stream_store:
+                    type_ = "stream"
                 else:
                     type_ = "none"
                 conn.sendall(b"+" + type_.encode() + b"\r\n")
