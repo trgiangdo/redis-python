@@ -2,7 +2,7 @@ import socket
 import threading
 import time
 
-from app.resp_parser import bulk_array, bulk_int, bulk_string, decode_resp
+from app.resp_parser import bulk_array, bulk_int, bulk_stream_entries, bulk_string, decode_resp
 
 HOST = "localhost"
 PORT = 6379
@@ -143,6 +143,27 @@ def handle_connection(conn: socket.socket) -> None:
                     fields = dict(zip(args[3::2], args[4::2]))
                     stream_store.setdefault(key, []).append((entry_id, fields))
                     conn.sendall(bulk_string(entry_id))
+            case "XRANGE":
+                def _parse_id(id_str: str, end: bool = False) -> tuple[float, float]:
+                    if id_str == "-":
+                        return (0, 0)
+                    if id_str == "+":
+                        return (float("inf"), float("inf"))
+                    if "-" in id_str:
+                        ms, seq = id_str.split("-")
+                        return (int(ms), int(seq))
+                    return (int(id_str), float("inf")) if end else (int(id_str), 0)
+
+                entries = stream_store.get(args[1], [])
+                start, end = _parse_id(args[2]), _parse_id(args[3], end=True)
+                count = int(args[5]) if len(args) >= 6 and args[4].upper() == "COUNT" else None
+                result = [
+                    e for e in entries
+                    if start <= tuple(int(x) for x in e[0].split("-")) <= end
+                ]
+                if count is not None:
+                    result = result[:count]
+                conn.sendall(bulk_stream_entries(result))
             case "TYPE":
                 key = args[1]
                 if key in store:

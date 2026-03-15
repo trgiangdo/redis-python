@@ -25,6 +25,17 @@ def decode_resp(data: str) -> List[str]:
     return result
 
 
+def bulk_stream_entries(entries: list[tuple[str, dict[str, str]]]) -> bytes:
+    """Encode a list of stream entries as a RESP array of [id, [field, value, ...]] pairs."""
+    parts = [b"*" + str(len(entries)).encode() + b"\r\n"]
+    for entry_id, fields in entries:
+        flat_fields = [item for pair in fields.items() for item in pair]
+        parts.append(b"*2\r\n")
+        parts.append(bulk_string(entry_id))
+        parts.append(bulk_array(flat_fields))
+    return b"".join(parts)
+
+
 def bulk_array(values: list[str]) -> bytes:
     header = b"*" + str(len(values)).encode() + b"\r\n"
     return header + b"".join(bulk_string(v) for v in values)
