@@ -202,7 +202,7 @@ def handle_connection(conn: socket.socket) -> None:
                 if response:
                     conn.sendall(bulk_xread_response(response))
                 else:
-                    conn.sendall(b"$-1\r\n")
+                    conn.sendall(b"*-1\r\n")
             case "XRANGE":
                 def _parse_id(id_str: str, end: bool = False) -> tuple[float, float]:
                     if id_str == "-":
