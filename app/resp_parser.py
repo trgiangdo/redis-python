@@ -25,6 +25,16 @@ def decode_resp(data: str) -> List[str]:
     return result
 
 
+def bulk_xread_response(streams: list[tuple[str, list[tuple[str, dict[str, str]]]]]) -> bytes:
+    """Encode XREAD response: array of [key, entries] pairs."""
+    parts = [b"*" + str(len(streams)).encode() + b"\r\n"]
+    for key, entries in streams:
+        parts.append(b"*2\r\n")
+        parts.append(bulk_string(key))
+        parts.append(bulk_stream_entries(entries))
+    return b"".join(parts)
+
+
 def bulk_stream_entries(entries: list[tuple[str, dict[str, str]]]) -> bytes:
     """Encode a list of stream entries as a RESP array of [id, [field, value, ...]] pairs."""
     parts = [b"*" + str(len(entries)).encode() + b"\r\n"]

@@ -2,7 +2,7 @@ import socket
 import threading
 import time
 
-from app.resp_parser import bulk_array, bulk_int, bulk_stream_entries, bulk_string, decode_resp
+from app.resp_parser import bulk_array, bulk_int, bulk_stream_entries, bulk_string, bulk_xread_response, decode_resp
 
 HOST = "localhost"
 PORT = 6379
@@ -16,6 +16,7 @@ list_condition = threading.Condition()
 
 # Each stream entry: (id, {field: value, ...})
 stream_store: dict[str, list[tuple[str, dict[str, str]]]] = {}
+stream_condition = threading.Condition()
 
 
 _XADD_ID_ERROR = b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
@@ -141,8 +142,67 @@ def handle_connection(conn: socket.socket) -> None:
                     conn.sendall(err)
                 else:
                     fields = dict(zip(args[3::2], args[4::2]))
-                    stream_store.setdefault(key, []).append((entry_id, fields))
+                    with stream_condition:
+                        stream_store.setdefault(key, []).append((entry_id, fields))
+                        stream_condition.notify_all()
                     conn.sendall(bulk_string(entry_id))
+            case "XREAD":
+                i = 1
+                count = None
+                if args[i].upper() == "COUNT":
+                    count = int(args[i + 1])
+                    i += 2
+                block_ms = None
+                if args[i].upper() == "BLOCK":
+                    block_ms = int(args[i + 1])
+                    i += 2
+                i += 1  # skip STREAMS
+                remaining = args[i:]
+                mid = len(remaining) // 2
+                keys, start_ids = remaining[:mid], remaining[mid:]
+
+                def _parse_exclusive_id(id_str: str, key: str) -> tuple[int, int]:
+                    if id_str == "$":
+                        entries = stream_store.get(key, [])
+                        if entries:
+                            ms, seq = entries[-1][0].split("-")
+                            return (int(ms), int(seq))
+                        return (0, 0)
+                    ms, seq = id_str.split("-")
+                    return (int(ms), int(seq))
+
+                def _read_streams() -> list | None:
+                    result = []
+                    for key, start_id_str in zip(keys, start_ids):
+                        after = _parse_exclusive_id(start_id_str, key)
+                        entries = [
+                            e for e in stream_store.get(key, [])
+                            if (lambda p: (int(p[0]), int(p[1])))(e[0].split("-")) > after
+                        ]
+                        if count is not None:
+                            entries = entries[:count]
+                        if entries:
+                            result.append((key, entries))
+                    return result if result else None
+
+                deadline = time.time() + block_ms / 1000 if block_ms is not None and block_ms > 0 else None
+                with stream_condition:
+                    # Resolve $ IDs before blocking so they capture the current last ID
+                    resolved_ids = [_parse_exclusive_id(sid, k) for k, sid in zip(keys, start_ids)]
+                    start_ids = [f"{ms}-{seq}" for ms, seq in resolved_ids]
+
+                    response = _read_streams()
+                    while response is None and block_ms is not None:
+                        remaining_time = max(0.0, deadline - time.time()) if deadline else None
+                        if remaining_time == 0.0:
+                            break
+                        stream_condition.wait(timeout=remaining_time)
+                        response = _read_streams()
+
+                if response:
+                    conn.sendall(bulk_xread_response(response))
+                else:
+                    conn.sendall(b"$-1\r\n")
             case "XRANGE":
                 def _parse_id(id_str: str, end: bool = False) -> tuple[float, float]:
                     if id_str == "-":
@@ -159,7 +219,7 @@ def handle_connection(conn: socket.socket) -> None:
                 count = int(args[5]) if len(args) >= 6 and args[4].upper() == "COUNT" else None
                 result = [
                     e for e in entries
-                    if start <= tuple(int(x) for x in e[0].split("-")) <= end
+                    if start <= (lambda p: (int(p[0]), int(p[1])))(e[0].split("-")) <= end
                 ]
                 if count is not None:
                     result = result[:count]
