@@ -1,3 +1,4 @@
+import argparse
 import socket
 import threading
 import time
@@ -5,7 +6,7 @@ import time
 from app.resp_parser import bulk_array, bulk_int, bulk_stream_entries, bulk_string, bulk_xread_response, decode_resp
 
 HOST = "localhost"
-PORT = 6379
+DEFAULT_PORT = 6379
 
 BUFFER_SIZE_BYTES = 1024
 
@@ -286,7 +287,11 @@ def handle_connection(conn: socket.socket) -> None:
 
 
 def main():
-    with socket.create_server((HOST, PORT), reuse_port=True) as server_socket:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    args = parser.parse_args()
+
+    with socket.create_server((HOST, args.port), reuse_port=True) as server_socket:
         while True:
             connection, _ = server_socket.accept()
             threading.Thread(target=handle_connection, args=(connection,)).start()
