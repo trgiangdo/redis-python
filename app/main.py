@@ -302,6 +302,9 @@ def main():
 
     if args.replicaof:
         role = "slave"
+        master_host, master_port = args.replicaof.split()
+        master_sock = socket.create_connection((master_host, int(master_port)))
+        master_sock.sendall(b"*1\r\n$4\r\nPING\r\n")
 
     with socket.create_server((HOST, args.port), reuse_port=True) as server_socket:
         while True:
