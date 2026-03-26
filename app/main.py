@@ -266,6 +266,15 @@ def handle_connection(conn: socket.socket) -> None:
             queue = []
             continue
 
+        if cmd == "DISCARD":
+            if not in_multi:
+                conn.sendall(b"-ERR DISCARD without MULTI\r\n")
+                continue
+            in_multi = False
+            queue = []
+            conn.sendall(b"+OK\r\n")
+            continue
+
         if in_multi:
             queue.append(args)
             conn.sendall(b"+QUEUED\r\n")
