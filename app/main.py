@@ -52,6 +52,9 @@ def _generate_stream_id(key: str, requested_id: str) -> tuple[str, bytes | None]
 
 
 def handle_connection(conn: socket.socket) -> None:
+    in_multi = False
+    queue: list[list[str]] = []
+
     while True:
         data = conn.recv(BUFFER_SIZE_BYTES)
         if not data:
@@ -60,7 +63,19 @@ def handle_connection(conn: socket.socket) -> None:
         print(f"Received command: {command!r}")
 
         args = decode_resp(command)
-        match args[0].upper():
+        cmd = args[0].upper()
+
+        if cmd == "MULTI":
+            in_multi = True
+            conn.sendall(b"+OK\r\n")
+            continue
+
+        if in_multi:
+            queue.append(args)
+            conn.sendall(b"+QUEUED\r\n")
+            continue
+
+        match cmd:
             case "PING":
                 conn.sendall(b"+PONG\r\n")
             case "ECHO":
