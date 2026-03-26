@@ -11,6 +11,8 @@ DEFAULT_PORT = 6379
 BUFFER_SIZE_BYTES = 1024
 
 role = "master"
+master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
+master_repl_offset = 0
 
 # Maps key -> (value, expiry_ms) where expiry_ms is None if no expiry
 store: dict[str, tuple[str, float | None]] = {}
@@ -62,7 +64,8 @@ def _execute(args: list[str]) -> bytes:
         case "ECHO":
             return bulk_string(args[1])
         case "INFO":
-            return bulk_string(f"role:{role}")
+            info = f"role:{role}\r\nmaster_replid:{master_replid}\r\nmaster_repl_offset:{master_repl_offset}"
+            return bulk_string(info)
         case "SET":
             expiry_ms = None
             if len(args) >= 4:
