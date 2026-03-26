@@ -10,6 +10,8 @@ DEFAULT_PORT = 6379
 
 BUFFER_SIZE_BYTES = 1024
 
+role = "master"
+
 # Maps key -> (value, expiry_ms) where expiry_ms is None if no expiry
 store: dict[str, tuple[str, float | None]] = {}
 list_store: dict[str, list[str]] = {}
@@ -60,7 +62,7 @@ def _execute(args: list[str]) -> bytes:
         case "ECHO":
             return bulk_string(args[1])
         case "INFO":
-            return bulk_string("role:master")
+            return bulk_string(f"role:{role}")
         case "SET":
             expiry_ms = None
             if len(args) >= 4:
@@ -289,9 +291,14 @@ def handle_connection(conn: socket.socket) -> None:
 
 
 def main():
+    global role
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--replicaof", type=str, default=None)
     args = parser.parse_args()
+
+    if args.replicaof:
+        role = "slave"
 
     with socket.create_server((HOST, args.port), reuse_port=True) as server_socket:
         while True:
