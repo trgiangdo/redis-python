@@ -235,6 +235,16 @@ def handle_connection(conn: socket.socket) -> None:
                 else:
                     type_ = "none"
                 conn.sendall(b"+" + type_.encode() + b"\r\n")
+            case "INCR":
+                entry = store.get(args[1])
+                current = entry[0] if entry is not None else "0"
+                try:
+                    new_val = int(current) + 1
+                except ValueError:
+                    conn.sendall(b"-ERR value is not an integer or out of range\r\n")
+                    continue
+                store[args[1]] = (str(new_val), entry[1] if entry else None)
+                conn.sendall(bulk_int(new_val))
             case "LLEN":
                 lst = list_store.get(args[1], [])
                 conn.sendall(bulk_int(len(lst)))
