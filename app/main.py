@@ -59,6 +59,8 @@ def _execute(args: list[str]) -> bytes:
             return b"+PONG\r\n"
         case "ECHO":
             return bulk_string(args[1])
+        case "INFO":
+            return bulk_string("role:master")
         case "SET":
             expiry_ms = None
             if len(args) >= 4:
