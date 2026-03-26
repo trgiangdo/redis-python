@@ -239,6 +239,8 @@ def _execute(args: list[str]) -> bytes:
             return bulk_int(new_val)
         case "REPLCONF":
             return b"+OK\r\n"
+        case "PSYNC":
+            return f"+FULLRESYNC {master_replid} {master_repl_offset}\r\n".encode()
         case "LLEN":
             lst = list_store.get(args[1], [])
             return bulk_int(len(lst))
@@ -314,6 +316,9 @@ def main():
 
         master_sock.sendall(bulk_array(["REPLCONF", "capa", "psync2"]))
         master_sock.recv(BUFFER_SIZE_BYTES)  # +OK
+
+        master_sock.sendall(bulk_array(["PSYNC", "?", "-1"]))
+        master_sock.recv(BUFFER_SIZE_BYTES)  # +FULLRESYNC <repl_id> 0
 
     with socket.create_server((HOST, args.port), reuse_port=True) as server_socket:
         while True:
