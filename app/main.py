@@ -51,6 +51,191 @@ def _generate_stream_id(key: str, requested_id: str) -> tuple[str, bytes | None]
     return f"{ms}-{seq}", None
 
 
+def _execute(args: list[str]) -> bytes:
+    cmd = args[0].upper()
+    match cmd:
+        case "PING":
+            return b"+PONG\r\n"
+        case "ECHO":
+            return bulk_string(args[1])
+        case "SET":
+            expiry_ms = None
+            if len(args) >= 4:
+                match args[3].upper():
+                    case "EX":
+                        expiry_ms = time.time() * 1000 + int(args[4]) * 1000
+                    case "PX":
+                        expiry_ms = time.time() * 1000 + int(args[4])
+            store[args[1]] = (args[2], expiry_ms)
+            return b"+OK\r\n"
+        case "GET":
+            entry = store.get(args[1])
+            if entry is None:
+                return b"$-1\r\n"
+            value, expiry_ms = entry
+            if expiry_ms is not None and time.time() * 1000 > expiry_ms:
+                del store[args[1]]
+                return b"$-1\r\n"
+            return bulk_string(value)
+        case "RPUSH":
+            with list_condition:
+                lst = list_store.setdefault(args[1], [])
+                lst.extend(args[2:])
+                list_condition.notify_all()
+            return bulk_int(len(lst))
+        case "LPUSH":
+            with list_condition:
+                lst = list_store.setdefault(args[1], [])
+                lst[:0] = reversed(args[2:])
+                list_condition.notify_all()
+            return bulk_int(len(lst))
+        case "LRANGE":
+            lst = list_store.get(args[1], [])
+            start, stop = int(args[2]), int(args[3])
+            if stop == -1:
+                stop = len(lst)
+            return bulk_array(lst[start:stop + 1])
+        case "LPOP":
+            lst = list_store.get(args[1])
+            if not lst:
+                return b"$-1\r\n"
+            if len(args) == 2:
+                return bulk_string(lst.pop(0))
+            count = int(args[2])
+            popped, lst[:count] = lst[:count], []
+            return bulk_array(popped)
+        case "BLPOP":
+            try:
+                keys, timeout = args[1:-1], float(args[-1])
+            except ValueError:
+                keys, timeout = args[1:], 0.0
+            deadline = time.time() + timeout if timeout > 0 else None
+            response = None
+            with list_condition:
+                while response is None:
+                    for key in keys:
+                        lst = list_store.get(key)
+                        if lst:
+                            response = bulk_array([key, lst.pop(0)])
+                            break
+                    if response:
+                        break
+                    remaining = max(0.0, deadline - time.time()) if deadline else None
+                    if remaining == 0.0:
+                        break
+                    list_condition.wait(timeout=remaining)
+            return response if response else b"*-1\r\n"
+        case "XADD":
+            key = args[1]
+            entry_id, err = _generate_stream_id(key, args[2])
+            if err:
+                return err
+            fields = dict(zip(args[3::2], args[4::2]))
+            with stream_condition:
+                stream_store.setdefault(key, []).append((entry_id, fields))
+                stream_condition.notify_all()
+            return bulk_string(entry_id)
+        case "XREAD":
+            i = 1
+            count = None
+            if args[i].upper() == "COUNT":
+                count = int(args[i + 1])
+                i += 2
+            block_ms = None
+            if args[i].upper() == "BLOCK":
+                block_ms = int(args[i + 1])
+                i += 2
+            i += 1  # skip STREAMS
+            remaining = args[i:]
+            mid = len(remaining) // 2
+            keys, start_ids = remaining[:mid], remaining[mid:]
+
+            def _parse_exclusive_id(id_str: str, key: str) -> tuple[int, int]:
+                if id_str == "$":
+                    entries = stream_store.get(key, [])
+                    if entries:
+                        ms, seq = entries[-1][0].split("-")
+                        return (int(ms), int(seq))
+                    return (0, 0)
+                ms, seq = id_str.split("-")
+                return (int(ms), int(seq))
+
+            def _read_streams() -> list | None:
+                result = []
+                for key, start_id_str in zip(keys, start_ids):
+                    after = _parse_exclusive_id(start_id_str, key)
+                    entries = [
+                        e for e in stream_store.get(key, [])
+                        if (lambda p: (int(p[0]), int(p[1])))(e[0].split("-")) > after
+                    ]
+                    if count is not None:
+                        entries = entries[:count]
+                    if entries:
+                        result.append((key, entries))
+                return result if result else None
+
+            deadline = time.time() + block_ms / 1000 if block_ms is not None and block_ms > 0 else None
+            with stream_condition:
+                resolved_ids = [_parse_exclusive_id(sid, k) for k, sid in zip(keys, start_ids)]
+                start_ids = [f"{ms}-{seq}" for ms, seq in resolved_ids]
+
+                response = _read_streams()
+                while response is None and block_ms is not None:
+                    remaining_time = max(0.0, deadline - time.time()) if deadline else None
+                    if remaining_time == 0.0:
+                        break
+                    stream_condition.wait(timeout=remaining_time)
+                    response = _read_streams()
+
+            return bulk_xread_response(response) if response else b"*-1\r\n"
+        case "XRANGE":
+            def _parse_id(id_str: str, end: bool = False) -> tuple[float, float]:
+                if id_str == "-":
+                    return (0, 0)
+                if id_str == "+":
+                    return (float("inf"), float("inf"))
+                if "-" in id_str:
+                    ms, seq = id_str.split("-")
+                    return (int(ms), int(seq))
+                return (int(id_str), float("inf")) if end else (int(id_str), 0)
+
+            entries = stream_store.get(args[1], [])
+            start, end = _parse_id(args[2]), _parse_id(args[3], end=True)
+            count = int(args[5]) if len(args) >= 6 and args[4].upper() == "COUNT" else None
+            result = [
+                e for e in entries
+                if start <= (lambda p: (int(p[0]), int(p[1])))(e[0].split("-")) <= end
+            ]
+            if count is not None:
+                result = result[:count]
+            return bulk_stream_entries(result)
+        case "TYPE":
+            key = args[1]
+            if key in store:
+                type_ = "string"
+            elif key in list_store:
+                type_ = "list"
+            elif key in stream_store:
+                type_ = "stream"
+            else:
+                type_ = "none"
+            return b"+" + type_.encode() + b"\r\n"
+        case "INCR":
+            entry = store.get(args[1])
+            current = entry[0] if entry is not None else "0"
+            try:
+                new_val = int(current) + 1
+            except ValueError:
+                return b"-ERR value is not an integer or out of range\r\n"
+            store[args[1]] = (str(new_val), entry[1] if entry else None)
+            return bulk_int(new_val)
+        case "LLEN":
+            lst = list_store.get(args[1], [])
+            return bulk_int(len(lst))
+        case _:
+            return b"-ERR unknown command\r\n"
+
+
 def handle_connection(conn: socket.socket) -> None:
     in_multi = False
     queue: list[list[str]] = []
@@ -70,201 +255,23 @@ def handle_connection(conn: socket.socket) -> None:
             conn.sendall(b"+OK\r\n")
             continue
 
+        if cmd == "EXEC":
+            if not in_multi:
+                conn.sendall(b"-ERR EXEC without MULTI\r\n")
+                continue
+            responses = [_execute(queued_args) for queued_args in queue]
+            header = b"*" + str(len(responses)).encode() + b"\r\n"
+            conn.sendall(header + b"".join(responses))
+            in_multi = False
+            queue = []
+            continue
+
         if in_multi:
             queue.append(args)
             conn.sendall(b"+QUEUED\r\n")
             continue
 
-        match cmd:
-            case "PING":
-                conn.sendall(b"+PONG\r\n")
-            case "ECHO":
-                conn.sendall(bulk_string(args[1]))
-            case "SET":
-                expiry_ms = None
-                if len(args) >= 4:
-                    match args[3].upper():
-                        case "EX":
-                            expiry_ms = time.time() * 1000 + int(args[4]) * 1000
-                        case "PX":
-                            expiry_ms = time.time() * 1000 + int(args[4])
-                store[args[1]] = (args[2], expiry_ms)
-                conn.sendall(b"+OK\r\n")
-            case "GET":
-                entry = store.get(args[1])
-                if entry is None:
-                    conn.sendall(b"$-1\r\n")
-                else:
-                    value, expiry_ms = entry
-                    if expiry_ms is not None and time.time() * 1000 > expiry_ms:
-                        del store[args[1]]
-                        conn.sendall(b"$-1\r\n")
-                    else:
-                        conn.sendall(bulk_string(value))
-            case "RPUSH":
-                with list_condition:
-                    lst = list_store.setdefault(args[1], [])
-                    lst.extend(args[2:])
-                    list_condition.notify_all()
-                conn.sendall(bulk_int(len(lst)))
-            case "LPUSH":
-                with list_condition:
-                    lst = list_store.setdefault(args[1], [])
-                    lst[:0] = reversed(args[2:])
-                    list_condition.notify_all()
-                conn.sendall(bulk_int(len(lst)))
-            case "LRANGE":
-                lst = list_store.get(args[1], [])
-                start, stop = int(args[2]), int(args[3])
-                if stop == -1:
-                    stop = len(lst)
-                conn.sendall(bulk_array(lst[start:stop + 1]))
-            case "LPOP":
-                lst = list_store.get(args[1])
-                if not lst:
-                    conn.sendall(b"$-1\r\n")
-                elif len(args) == 2:
-                    conn.sendall(bulk_string(lst.pop(0)))
-                else:
-                    count = int(args[2])
-                    popped, lst[:count] = lst[:count], []
-                    conn.sendall(bulk_array(popped))
-            case "BLPOP":
-                try:
-                    keys, timeout = args[1:-1], float(args[-1])
-                except ValueError:
-                    keys, timeout = args[1:], 0.0
-                deadline = time.time() + timeout if timeout > 0 else None
-                response = None
-                with list_condition:
-                    while response is None:
-                        for key in keys:
-                            lst = list_store.get(key)
-                            if lst:
-                                response = bulk_array([key, lst.pop(0)])
-                                break
-                        if response:
-                            break
-                        remaining = max(0.0, deadline - time.time()) if deadline else None
-                        if remaining == 0.0:
-                            break
-                        list_condition.wait(timeout=remaining)
-                conn.sendall(response if response else b"*-1\r\n")
-            case "XADD":
-                key = args[1]
-                entry_id, err = _generate_stream_id(key, args[2])
-                if err:
-                    conn.sendall(err)
-                else:
-                    fields = dict(zip(args[3::2], args[4::2]))
-                    with stream_condition:
-                        stream_store.setdefault(key, []).append((entry_id, fields))
-                        stream_condition.notify_all()
-                    conn.sendall(bulk_string(entry_id))
-            case "XREAD":
-                i = 1
-                count = None
-                if args[i].upper() == "COUNT":
-                    count = int(args[i + 1])
-                    i += 2
-                block_ms = None
-                if args[i].upper() == "BLOCK":
-                    block_ms = int(args[i + 1])
-                    i += 2
-                i += 1  # skip STREAMS
-                remaining = args[i:]
-                mid = len(remaining) // 2
-                keys, start_ids = remaining[:mid], remaining[mid:]
-
-                def _parse_exclusive_id(id_str: str, key: str) -> tuple[int, int]:
-                    if id_str == "$":
-                        entries = stream_store.get(key, [])
-                        if entries:
-                            ms, seq = entries[-1][0].split("-")
-                            return (int(ms), int(seq))
-                        return (0, 0)
-                    ms, seq = id_str.split("-")
-                    return (int(ms), int(seq))
-
-                def _read_streams() -> list | None:
-                    result = []
-                    for key, start_id_str in zip(keys, start_ids):
-                        after = _parse_exclusive_id(start_id_str, key)
-                        entries = [
-                            e for e in stream_store.get(key, [])
-                            if (lambda p: (int(p[0]), int(p[1])))(e[0].split("-")) > after
-                        ]
-                        if count is not None:
-                            entries = entries[:count]
-                        if entries:
-                            result.append((key, entries))
-                    return result if result else None
-
-                deadline = time.time() + block_ms / 1000 if block_ms is not None and block_ms > 0 else None
-                with stream_condition:
-                    # Resolve $ IDs before blocking so they capture the current last ID
-                    resolved_ids = [_parse_exclusive_id(sid, k) for k, sid in zip(keys, start_ids)]
-                    start_ids = [f"{ms}-{seq}" for ms, seq in resolved_ids]
-
-                    response = _read_streams()
-                    while response is None and block_ms is not None:
-                        remaining_time = max(0.0, deadline - time.time()) if deadline else None
-                        if remaining_time == 0.0:
-                            break
-                        stream_condition.wait(timeout=remaining_time)
-                        response = _read_streams()
-
-                if response:
-                    conn.sendall(bulk_xread_response(response))
-                else:
-                    conn.sendall(b"*-1\r\n")
-            case "XRANGE":
-                def _parse_id(id_str: str, end: bool = False) -> tuple[float, float]:
-                    if id_str == "-":
-                        return (0, 0)
-                    if id_str == "+":
-                        return (float("inf"), float("inf"))
-                    if "-" in id_str:
-                        ms, seq = id_str.split("-")
-                        return (int(ms), int(seq))
-                    return (int(id_str), float("inf")) if end else (int(id_str), 0)
-
-                entries = stream_store.get(args[1], [])
-                start, end = _parse_id(args[2]), _parse_id(args[3], end=True)
-                count = int(args[5]) if len(args) >= 6 and args[4].upper() == "COUNT" else None
-                result = [
-                    e for e in entries
-                    if start <= (lambda p: (int(p[0]), int(p[1])))(e[0].split("-")) <= end
-                ]
-                if count is not None:
-                    result = result[:count]
-                conn.sendall(bulk_stream_entries(result))
-            case "TYPE":
-                key = args[1]
-                if key in store:
-                    type_ = "string"
-                elif key in list_store:
-                    type_ = "list"
-                elif key in stream_store:
-                    type_ = "stream"
-                else:
-                    type_ = "none"
-                conn.sendall(b"+" + type_.encode() + b"\r\n")
-            case "INCR":
-                entry = store.get(args[1])
-                current = entry[0] if entry is not None else "0"
-                try:
-                    new_val = int(current) + 1
-                except ValueError:
-                    conn.sendall(b"-ERR value is not an integer or out of range\r\n")
-                    continue
-                store[args[1]] = (str(new_val), entry[1] if entry else None)
-                conn.sendall(bulk_int(new_val))
-            case "LLEN":
-                lst = list_store.get(args[1], [])
-                conn.sendall(bulk_int(len(lst)))
-            case _:
-                conn.sendall(b"-ERR unknown command\r\n")
+        conn.sendall(_execute(args))
 
     conn.close()
 
