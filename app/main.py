@@ -237,6 +237,8 @@ def _execute(args: list[str]) -> bytes:
                 return b"-ERR value is not an integer or out of range\r\n"
             store[args[1]] = (str(new_val), entry[1] if entry else None)
             return bulk_int(new_val)
+        case "REPLCONF":
+            return b"+OK\r\n"
         case "LLEN":
             lst = list_store.get(args[1], [])
             return bulk_int(len(lst))
@@ -305,6 +307,13 @@ def main():
         master_host, master_port = args.replicaof.split()
         master_sock = socket.create_connection((master_host, int(master_port)))
         master_sock.sendall(b"*1\r\n$4\r\nPING\r\n")
+        master_sock.recv(BUFFER_SIZE_BYTES)  # +PONG
+
+        master_sock.sendall(bulk_array(["REPLCONF", "listening-port", str(args.port)]))
+        master_sock.recv(BUFFER_SIZE_BYTES)  # +OK
+
+        master_sock.sendall(bulk_array(["REPLCONF", "capa", "psync2"]))
+        master_sock.recv(BUFFER_SIZE_BYTES)  # +OK
 
     with socket.create_server((HOST, args.port), reuse_port=True) as server_socket:
         while True:
