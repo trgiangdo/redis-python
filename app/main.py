@@ -240,7 +240,14 @@ def _execute(args: list[str]) -> bytes:
         case "REPLCONF":
             return b"+OK\r\n"
         case "PSYNC":
-            return f"+FULLRESYNC {master_replid} {master_repl_offset}\r\n".encode()
+            empty_rdb = bytes.fromhex(
+                "524544495330303131fa0972656469732d76657205372e322e30"
+                "fa0a72656469732d62697473c040fa056374696d65c26d08bc65"
+                "fa08757365642d6d656dc2b0c41000fa06616f662d62617365"
+                "c000fff06e3bfec0ff5aa2"
+            )
+            rdb_response = b"$" + str(len(empty_rdb)).encode() + b"\r\n" + empty_rdb
+            return f"+FULLRESYNC {master_replid} {master_repl_offset}\r\n".encode() + rdb_response
         case "LLEN":
             lst = list_store.get(args[1], [])
             return bulk_int(len(lst))
