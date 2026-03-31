@@ -14,6 +14,10 @@ role = "master"
 master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
 master_repl_offset = 0
 
+replicas: list[socket.socket] = []
+
+WRITE_COMMANDS = {"SET", "DEL", "RPUSH", "LPUSH", "LPOP", "INCR", "XADD"}
+
 # Maps key -> (value, expiry_ms) where expiry_ms is None if no expiry
 store: dict[str, tuple[str, float | None]] = {}
 list_store: dict[str, list[str]] = {}
@@ -294,12 +298,23 @@ def handle_connection(conn: socket.socket) -> None:
             conn.sendall(b"+OK\r\n")
             continue
 
+        if cmd == "PSYNC":
+            conn.sendall(_execute(args))
+            replicas.append(conn)
+            return  # connection is now a replication stream, don't close it
+
         if in_multi:
             queue.append(args)
             conn.sendall(b"+QUEUED\r\n")
             continue
 
-        conn.sendall(_execute(args))
+        response = _execute(args)
+        conn.sendall(response)
+
+        if cmd in WRITE_COMMANDS:
+            propagated = bulk_array(args)
+            for replica in replicas:
+                replica.sendall(propagated)
 
     conn.close()
 
@@ -325,7 +340,17 @@ def main():
         master_sock.recv(BUFFER_SIZE_BYTES)  # +OK
 
         master_sock.sendall(bulk_array(["PSYNC", "?", "-1"]))
-        master_sock.recv(BUFFER_SIZE_BYTES)  # +FULLRESYNC <repl_id> 0
+        master_sock.recv(BUFFER_SIZE_BYTES)  # +FULLRESYNC <repl_id> 0 + RDB file
+
+        def _handle_master_replication(sock: socket.socket) -> None:
+            while True:
+                data = sock.recv(BUFFER_SIZE_BYTES)
+                if not data:
+                    break
+                args = decode_resp(data.decode("utf-8"))
+                _execute(args)  # execute silently, no response
+
+        threading.Thread(target=_handle_master_replication, args=(master_sock,), daemon=True).start()
 
     with socket.create_server((HOST, args.port), reuse_port=True) as server_socket:
         while True:
