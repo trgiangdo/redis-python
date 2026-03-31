@@ -3,7 +3,15 @@ import socket
 import threading
 import time
 
-from app.resp_parser import bulk_array, bulk_int, bulk_stream_entries, bulk_string, bulk_xread_response, decode_resp
+from app.resp_parser import (
+    bulk_array,
+    bulk_int,
+    bulk_stream_entries,
+    bulk_string,
+    bulk_xread_response,
+    decode_resp,
+    decode_resp_all,
+)
 
 HOST = "localhost"
 DEFAULT_PORT = 6379
@@ -340,17 +348,37 @@ def main():
         master_sock.recv(BUFFER_SIZE_BYTES)  # +OK
 
         master_sock.sendall(bulk_array(["PSYNC", "?", "-1"]))
-        master_sock.recv(BUFFER_SIZE_BYTES)  # +FULLRESYNC <repl_id> 0 + RDB file
 
-        def _handle_master_replication(sock: socket.socket) -> None:
+        # Read FULLRESYNC line
+        buf = b""
+        while b"\r\n" not in buf:
+            buf += master_sock.recv(BUFFER_SIZE_BYTES)
+        buf = buf[buf.index(b"\r\n") + 2:]  # skip +FULLRESYNC line
+
+        # Read RDB file: $<length>\r\n<binary> (no trailing \r\n)
+        while b"\r\n" not in buf:
+            buf += master_sock.recv(BUFFER_SIZE_BYTES)
+        rdb_len_end = buf.index(b"\r\n")
+        rdb_len = int(buf[1:rdb_len_end])
+        buf = buf[rdb_len_end + 2:]
+        while len(buf) < rdb_len:
+            buf += master_sock.recv(BUFFER_SIZE_BYTES)
+        buf = buf[rdb_len:]  # leftover after RDB is command data
+
+        def _handle_master_replication(sock: socket.socket, initial_buf: bytes) -> None:
+            buf = initial_buf
             while True:
-                data = sock.recv(BUFFER_SIZE_BYTES)
-                if not data:
-                    break
-                args = decode_resp(data.decode("utf-8"))
-                _execute(args)  # execute silently, no response
+                if not buf:
+                    data = sock.recv(BUFFER_SIZE_BYTES)
+                    if not data:
+                        break
+                    buf = data
+                commands, consumed = decode_resp_all(buf.decode("utf-8"))
+                for cmd_args in commands:
+                    _execute(cmd_args)
+                buf = buf[consumed:]
 
-        threading.Thread(target=_handle_master_replication, args=(master_sock,), daemon=True).start()
+        threading.Thread(target=_handle_master_replication, args=(master_sock, buf), daemon=True).start()
 
     with socket.create_server((HOST, args.port), reuse_port=True) as server_socket:
         while True:

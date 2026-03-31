@@ -1,28 +1,48 @@
 from typing import List
 
 
+def _decode_one(data: str, pos: int) -> tuple[List[str], int]:
+    """Decode one RESP array starting at pos. Returns (args, new_pos)."""
+    if data[pos] != "*":
+        raise ValueError(f"Expected '*', got: {data[pos:]!r}")
+    nl = data.index("\r\n", pos)
+    num_elements = int(data[pos + 1:nl])
+    pos = nl + 2
+
+    result = []
+    for _ in range(num_elements):
+        if data[pos] != "$":
+            raise ValueError(f"Expected '$', got: {data[pos:]!r}")
+        nl = data.index("\r\n", pos)
+        length = int(data[pos + 1:nl])
+        pos = nl + 2
+        result.append(data[pos:pos + length])
+        pos += length + 2  # skip value + \r\n
+    return result, pos
+
+
 def decode_resp(data: str) -> List[str]:
-    """Decode a RESP array of bulk strings into a list of command arguments.
+    """Decode a single RESP array of bulk strings into a list of command arguments.
 
     Example: "*2\r\n$4\r\nECHO\r\n$5\r\nhello\r\n" -> ["ECHO", "hello"]
     """
-    lines = data.split("\r\n")
-    if not lines or not lines[0].startswith("*"):
-        raise ValueError(f"Expected RESP array, got: {data!r}")
-
-    num_elements = int(lines[0][1:])
-    result = []
-    i = 1
-
-    for _ in range(num_elements):
-        if not lines[i].startswith("$"):
-            raise ValueError(f"Expected bulk string, got: {lines[i]!r}")
-        length = int(lines[i][1:])
-        i += 1
-        result.append(lines[i][:length])
-        i += 1
-
+    result, _ = _decode_one(data, 0)
     return result
+
+
+def decode_resp_all(data: str) -> tuple[list[list[str]], int]:
+    """Decode all complete RESP arrays from data. Returns (commands, bytes_consumed)."""
+    commands = []
+    pos = 0
+    while pos < len(data):
+        if data[pos] != "*":
+            break
+        try:
+            result, pos = _decode_one(data, pos)
+            commands.append(result)
+        except (ValueError, IndexError):
+            break  # incomplete command
+    return commands, pos
 
 
 def bulk_xread_response(streams: list[tuple[str, list[tuple[str, dict[str, str]]]]]) -> bytes:
